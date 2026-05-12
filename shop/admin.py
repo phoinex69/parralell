@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import BackgroundTask, Order, OrderItem, Product
+from .models import Order, OrderItem, Product
 
 
 class OrderItemInline(admin.TabularInline):
@@ -17,13 +17,6 @@ class ProductAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ("id", "customer_email", "status", "total_amount", "created_at")
+    list_display = ("id", "user", "customer_email", "status", "total_amount", "created_at")
+    list_filter = ("status", "created_at")
     inlines = [OrderItemInline]
-
-
-@admin.register(BackgroundTask)
-class BackgroundTaskAdmin(admin.ModelAdmin):
-    list_display = ("id", "kind", "status", "attempts", "created_at", "updated_at")
-    list_filter = ("kind", "status")
-
-# Register your models here.

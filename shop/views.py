@@ -1,105 +1,193 @@
-import json
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+from django.core.cache import cache
+from django_celery_results.models import TaskResult
+from rest_framework import permissions, status
+from rest_framework.authtoken.models import Token
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET, require_POST
-
-from .models import BackgroundTask, Order, Product
-from .services import CheckoutLine, OutOfStockError, create_order
-
-
-@require_GET
-def health(request):
-    return JsonResponse({"status": "ok"})
-
-
-@require_GET
-def product_list(request):
-    products = Product.objects.order_by("id")
-    return JsonResponse({"products": [_product_to_dict(product) for product in products]})
-
-
-@require_GET
-def product_detail(request, product_id):
-    try:
-        product = Product.objects.get(id=product_id)
-    except Product.DoesNotExist:
-        return JsonResponse({"error": "product not found"}, status=404)
-
-    return JsonResponse({"product": _product_to_dict(product)})
-
-
-@csrf_exempt
-@require_POST
-def checkout(request):
-    try:
-        body = json.loads(request.body or "{}")
-        lines = [
-            CheckoutLine(product_id=int(item["product_id"]), quantity=int(item["quantity"]))
-            for item in body.get("items", [])
-        ]
-        order = create_order(customer_email=body["customer_email"], lines=lines)
-    except KeyError as exc:
-        return JsonResponse({"error": f"missing field: {exc.args[0]}"}, status=400)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
-    except OutOfStockError as exc:
-        return JsonResponse({"error": str(exc)}, status=409)
-
-    return JsonResponse(
-        {
-            "order": _order_to_dict(order),
-            "queued_background_tasks": ["email", "invoice"],
-        },
-        status=201,
-    )
+from .models import Order, Product
+from .serializers import (
+    CheckoutSerializer,
+    LoginSerializer,
+    OrderSerializer,
+    ProductSerializer,
+    RegisterSerializer,
+    StockUpdateSerializer,
+    TaskResultSerializer,
+)
+from .services import (
+    PRODUCT_LIST_CACHE_KEY,
+    CheckoutLine,
+    OutOfStockError,
+    StockUpdateError,
+    adjust_stock,
+    create_order,
+    product_detail_cache_key,
+)
 
 
-@require_GET
-def task_list(request):
-    tasks = BackgroundTask.objects.order_by("-created_at")[:50]
-    return JsonResponse(
-        {
-            "tasks": [
-                {
-                    "id": task.id,
-                    "kind": task.kind,
-                    "status": task.status,
-                    "attempts": task.attempts,
-                    "payload": task.payload,
-                    "last_error": task.last_error,
-                }
-                for task in tasks
-            ]
-        }
-    )
+class HealthView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = []
+
+    def get(self, request):
+        return Response({"status": "ok"})
 
 
-def _product_to_dict(product):
-    return {
-        "id": product.id,
-        "name": product.name,
-        "description": product.description,
-        "price": str(product.price),
-        "stock_quantity": product.stock_quantity,
-        "version": product.version,
-    }
+class RegisterView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "login"
 
+    def post(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-def _order_to_dict(order):
-    saved_order = Order.objects.prefetch_related("items__product").get(id=order.id)
-    return {
-        "id": saved_order.id,
-        "customer_email": saved_order.customer_email,
-        "status": saved_order.status,
-        "total_amount": str(saved_order.total_amount),
-        "items": [
+        user = User.objects.create_user(
+            username=serializer.validated_data["username"],
+            email=serializer.validated_data["email"],
+            password=serializer.validated_data["password"],
+        )
+        token, _ = Token.objects.get_or_create(user=user)
+
+        return Response(
             {
-                "product_id": item.product_id,
-                "product_name": item.product.name,
-                "quantity": item.quantity,
-                "unit_price": str(item.unit_price),
-            }
-            for item in saved_order.items.all()
-        ],
-    }
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                },
+                "token": token.key,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class LoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "login"
+
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = authenticate(
+            username=serializer.validated_data["username"],
+            password=serializer.validated_data["password"],
+        )
+        if user is None:
+            return Response(
+                {"detail": "invalid username or password"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({"token": token.key})
+
+
+class ProductListView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        cached_payload = cache.get(PRODUCT_LIST_CACHE_KEY)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        products = Product.objects.order_by("id")
+        payload = {"products": ProductSerializer(products, many=True).data}
+        cache.set(PRODUCT_LIST_CACHE_KEY, payload, timeout=30)
+        return Response(payload)
+
+
+class ProductDetailView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, product_id):
+        cache_key = product_detail_cache_key(product_id)
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            return Response({"detail": "product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        payload = {"product": ProductSerializer(product).data}
+        cache.set(cache_key, payload, timeout=30)
+        return Response(payload)
+
+
+class StockUpdateView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def patch(self, request, product_id):
+        serializer = StockUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            product = adjust_stock(product_id, serializer.validated_data["change"])
+        except Product.DoesNotExist:
+            return Response({"detail": "product not found"}, status=status.HTTP_404_NOT_FOUND)
+        except StockUpdateError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"product": ProductSerializer(product).data})
+
+
+class CheckoutView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "checkout"
+
+    def post(self, request):
+        serializer = CheckoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        lines = [
+            CheckoutLine(
+                product_id=item["product_id"],
+                quantity=item["quantity"],
+            )
+            for item in serializer.validated_data["items"]
+        ]
+
+        try:
+            order = create_order(user=request.user, lines=lines)
+        except OutOfStockError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        saved_order = Order.objects.prefetch_related("items__product").get(id=order.id)
+        return Response(
+            {
+                "order": OrderSerializer(saved_order).data,
+                "queued_background_tasks": [
+                    "send_order_confirmation",
+                    "generate_invoice",
+                    "log_order_analytics",
+                ],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class OrderListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        orders = (
+            Order.objects.filter(user=request.user)
+            .prefetch_related("items__product")
+            .order_by("-created_at")
+        )
+        return Response({"orders": OrderSerializer(orders, many=True).data})
+
+
+class TaskResultListView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        tasks = TaskResult.objects.order_by("-date_created")[:50]
+        return Response({"tasks": TaskResultSerializer(tasks, many=True).data})

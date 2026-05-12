@@ -1,44 +1,60 @@
-from django.db import transaction
+import logging
+import time
 
-from .models import BackgroundTask
+from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
+
+from .models import Order
 
 
-def process_next_task() -> bool:
-    with transaction.atomic():
-        task = (
-            BackgroundTask.objects.select_for_update()
-            .filter(status=BackgroundTask.Status.QUEUED)
-            .order_by("created_at")
-            .first()
-        )
-        if task is None:
-            return False
+logger = logging.getLogger(__name__)
 
-        task.status = BackgroundTask.Status.RUNNING
-        task.attempts += 1
-        task.save(update_fields=["status", "attempts", "updated_at"])
 
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
+def send_order_confirmation(self, order_id: int) -> dict:
     try:
-        _handle_task(task)
-    except Exception as exc:
-        task.status = BackgroundTask.Status.FAILED
-        task.last_error = str(exc)
-        task.save(update_fields=["status", "last_error", "updated_at"])
-        return True
-
-    task.status = BackgroundTask.Status.DONE
-    task.last_error = ""
-    task.save(update_fields=["status", "last_error", "updated_at"])
-    return True
+        order = Order.objects.get(id=order_id)
+        time.sleep(1)
+        logger.info("Sent confirmation email for order %s to %s", order.id, order.customer_email)
+        return {"order_id": order.id, "email": order.customer_email, "sent": True}
+    except SoftTimeLimitExceeded:
+        logger.warning("Email task timed out for order %s", order_id)
+        raise
 
 
-def _handle_task(task: BackgroundTask) -> None:
-    if task.kind == BackgroundTask.Kind.EMAIL:
-        print(f"Sending order email to {task.payload['email']}")
-        return
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+)
+def generate_invoice(self, order_id: int) -> dict:
+    try:
+        order = Order.objects.prefetch_related("items").get(id=order_id)
+        time.sleep(2)
+        logger.info("Generated invoice for order %s", order.id)
+        return {
+            "order_id": order.id,
+            "total_amount": str(order.total_amount),
+            "item_count": order.items.count(),
+        }
+    except SoftTimeLimitExceeded:
+        logger.warning("Invoice task timed out for order %s", order_id)
+        raise
 
-    if task.kind == BackgroundTask.Kind.INVOICE:
-        print(f"Generating invoice for order #{task.payload['order_id']}")
-        return
 
-    raise ValueError(f"unsupported task kind: {task.kind}")
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 2},
+)
+def log_order_analytics(self, order_id: int) -> dict:
+    order = Order.objects.get(id=order_id)
+    logger.info("Analytics event recorded for paid order %s", order.id)
+    return {"event": "order_paid", "order_id": order.id}

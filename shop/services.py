@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.core.cache import cache
 from django.db import transaction
-from django.db.models import F
 
-from .models import BackgroundTask, Order, OrderItem, Product
+from .models import Order, OrderItem, Product
 
 
 class OutOfStockError(Exception):
@@ -17,7 +17,18 @@ class CheckoutLine:
     quantity: int
 
 
-def create_order(customer_email: str, lines: list[CheckoutLine]) -> Order:
+class StockUpdateError(Exception):
+    pass
+
+
+PRODUCT_LIST_CACHE_KEY = "products:list"
+
+
+def product_detail_cache_key(product_id: int) -> str:
+    return f"products:detail:{product_id}"
+
+
+def create_order(user, lines: list[CheckoutLine]) -> Order:
     if not lines:
         raise ValueError("checkout requires at least one item")
 
@@ -25,10 +36,16 @@ def create_order(customer_email: str, lines: list[CheckoutLine]) -> Order:
 
     with transaction.atomic():
         product_ids = [line.product_id for line in normalized_lines]
-        products = {
-            product.id: product
-            for product in Product.objects.select_for_update().filter(id__in=product_ids)
-        }
+        # Pessimistic locking:
+        # select_for_update asks the database to lock these product rows until
+        # the transaction finishes. PostgreSQL will make another checkout wait
+        # instead of reading the same stock at the same time.
+        locked_products = (
+            Product.objects.select_for_update()
+            .filter(id__in=product_ids)
+            .order_by("id")
+        )
+        products = {product.id: product for product in locked_products}
 
         missing = sorted(set(product_ids) - set(products))
         if missing:
@@ -39,26 +56,21 @@ def create_order(customer_email: str, lines: list[CheckoutLine]) -> Order:
             if line.quantity <= 0:
                 raise ValueError("quantity must be greater than zero")
 
-            # Synchronization point:
-            # This conditional UPDATE is atomic in the database. Under concurrent
-            # checkout requests, exactly one transaction can consume each stock unit.
-            updated = Product.objects.filter(
-                id=line.product_id,
-                stock_quantity__gte=line.quantity,
-            ).update(
-                stock_quantity=F("stock_quantity") - line.quantity,
-                version=F("version") + 1,
-            )
-            if updated == 0:
-                product = products[line.product_id]
+            product = products[line.product_id]
+            if product.stock_quantity < line.quantity:
                 raise OutOfStockError(
                     f"not enough stock for {product.name}: requested {line.quantity}"
                 )
 
-            total += products[line.product_id].price * line.quantity
+            product.stock_quantity -= line.quantity
+            product.version += 1
+            product.save(update_fields=["stock_quantity", "version", "updated_at"])
+
+            total += product.price * line.quantity
 
         order = Order.objects.create(
-            customer_email=customer_email,
+            user=user,
+            customer_email=user.email or user.username,
             status=Order.Status.PAID,
             total_amount=total,
         )
@@ -75,20 +87,29 @@ def create_order(customer_email: str, lines: list[CheckoutLine]) -> Order:
             ]
         )
 
-        BackgroundTask.objects.bulk_create(
-            [
-                BackgroundTask(
-                    kind=BackgroundTask.Kind.EMAIL,
-                    payload={"order_id": order.id, "email": customer_email},
-                ),
-                BackgroundTask(
-                    kind=BackgroundTask.Kind.INVOICE,
-                    payload={"order_id": order.id},
-                ),
-            ]
-        )
+        changed_product_ids = [line.product_id for line in normalized_lines]
+        transaction.on_commit(lambda: _after_successful_checkout(order.id, changed_product_ids))
 
     return order
+
+
+def adjust_stock(product_id: int, change: int) -> Product:
+    if change == 0:
+        raise StockUpdateError("stock change cannot be zero")
+
+    with transaction.atomic():
+        product = Product.objects.select_for_update().get(id=product_id)
+        new_stock = product.stock_quantity + change
+        if new_stock < 0:
+            raise StockUpdateError("stock update would make inventory negative")
+
+        product.stock_quantity = new_stock
+        product.version += 1
+        product.save(update_fields=["stock_quantity", "version", "updated_at"])
+
+        transaction.on_commit(lambda: _clear_product_cache([product_id]))
+
+    return product
 
 
 def _merge_duplicate_lines(lines: list[CheckoutLine]) -> list[CheckoutLine]:
@@ -99,3 +120,23 @@ def _merge_duplicate_lines(lines: list[CheckoutLine]) -> list[CheckoutLine]:
         CheckoutLine(product_id=product_id, quantity=quantity)
         for product_id, quantity in quantities.items()
     ]
+
+
+def _after_successful_checkout(order_id: int, product_ids: list[int]) -> None:
+    _clear_product_cache(product_ids)
+
+    # Importing here avoids a circular import and keeps the service easy to read.
+    from .tasks import (
+        generate_invoice,
+        log_order_analytics,
+        send_order_confirmation,
+    )
+
+    send_order_confirmation.delay(order_id)
+    generate_invoice.delay(order_id)
+    log_order_analytics.delay(order_id)
+
+
+def _clear_product_cache(product_ids: list[int]) -> None:
+    cache.delete(PRODUCT_LIST_CACHE_KEY)
+    cache.delete_many([product_detail_cache_key(product_id) for product_id in product_ids])

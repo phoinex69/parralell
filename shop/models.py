@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -14,6 +15,8 @@ class Product(TimeStampedModel):
     description = models.TextField(blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock_quantity = models.PositiveIntegerField()
+    # The version is not required for pessimistic locking, but it is useful in
+    # demos because students can see that stock changed exactly once per update.
     version = models.PositiveIntegerField(default=0)
 
     def __str__(self):
@@ -26,6 +29,13 @@ class Order(TimeStampedModel):
         PAID = "paid", "Paid"
         FAILED = "failed", "Failed"
 
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="orders",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+    )
     customer_email = models.EmailField()
     status = models.CharField(max_length=20, choices=Status, default=Status.PENDING)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -40,25 +50,5 @@ class OrderItem(models.Model):
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
 
-
-class BackgroundTask(TimeStampedModel):
-    class Kind(models.TextChoices):
-        EMAIL = "email", "Email notification"
-        INVOICE = "invoice", "Invoice generation"
-
-    class Status(models.TextChoices):
-        QUEUED = "queued", "Queued"
-        RUNNING = "running", "Running"
-        DONE = "done", "Done"
-        FAILED = "failed", "Failed"
-
-    kind = models.CharField(max_length=30, choices=Kind)
-    status = models.CharField(max_length=20, choices=Status, default=Status.QUEUED)
-    payload = models.JSONField(default=dict)
-    attempts = models.PositiveIntegerField(default=0)
-    last_error = models.TextField(blank=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["status", "created_at"]),
-        ]
+    def line_total(self):
+        return self.unit_price * self.quantity

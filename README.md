@@ -1,143 +1,215 @@
 # High-Performance E-Commerce Backend Engine
 
-This is a Django student project for the Spring 2026 Parallel Programming course.
-The current version implements only the first three non-functional requirements,
-while keeping the structure ready for caching, batch jobs, load balancing, and
-stress testing later.
+Backend project for a Parallel Programming course. The goal is not to build a
+large online store. The goal is to show that a backend can keep shared data
+correct, avoid overload, and move slow work into background queues.
 
-## What The Project Means
+The implementation focuses deeply on the first three requirements:
 
-The course project is not mainly about building many shopping features. It is
-about proving that the backend stays correct and stable when many users use it
-at the same time.
+1. Concurrent access and data integrity.
+2. Resource management and capacity control.
+3. Asynchronous processing with queues.
 
-The full project asks for:
+## Architecture Overview
 
-1. Correct concurrent access to shared data such as product stock.
-2. Resource management so the server does not accept unlimited work.
-3. Asynchronous processing for slow tasks such as emails and invoices.
-4. Batch processing for large jobs such as daily sales reports.
-5. Load balancing across multiple server instances.
-6. Distributed caching, usually with Redis.
-7. Explicit locking strategy for sensitive updates.
-8. ACID transactions for operations that must fully succeed or fail.
-9. Stress testing with at least 100 concurrent users.
-10. Benchmarking and bottleneck analysis before and after optimization.
+The project uses one Django project and one Django app:
 
-This submission starts with requirements 1, 2, and 3.
-
-## Current Architecture
-
-`commerce_engine` is the Django project. `shop` is the e-commerce app.
-
-Main modules:
-
-- `shop.models`: products, orders, order items, and background task records.
-- `shop.services`: checkout business logic and inventory synchronization.
-- `shop.middleware`: request capacity control.
-- `shop.tasks`: background task processing.
-- `shop.management.commands.process_tasks`: worker command for async jobs.
-- `shop.views`: small JSON API.
-
-## Requirement 1: Concurrent Access And Data Integrity
-
-The sensitive resource is `Product.stock_quantity`.
-
-Checkout uses `transaction.atomic()` so order creation, inventory update, order
-items, and background task creation are one unit of work. If any step fails, the
-database rolls back.
-
-The synchronization point is in `shop/services.py`:
-
-```python
-Product.objects.filter(
-    id=line.product_id,
-    stock_quantity__gte=line.quantity,
-).update(
-    stock_quantity=F("stock_quantity") - line.quantity,
-    version=F("version") + 1,
-)
+```text
+commerce_engine/     Django settings, URLs, WSGI, Celery app
+shop/                Products, orders, checkout service, DRF APIs, Celery tasks
 ```
 
-This is an atomic conditional database update. If two users try to buy the last
-item at the same time, only one update can succeed. The other request receives a
-`409 Conflict` response instead of creating an invalid order.
+The important request flow is:
 
-`select_for_update()` is also present in the checkout query. SQLite ignores this,
-but PostgreSQL will use it as a pessimistic row lock in the future without
-rewriting the service design.
-
-## Requirement 2: Resource Management And Capacity Control
-
-`shop.middleware.CapacityControlMiddleware` uses a bounded semaphore. The server
-accepts only `MAX_CONCURRENT_REQUESTS` requests at the same time. If the limit is
-full for longer than `CAPACITY_WAIT_SECONDS`, the request returns HTTP `503`.
-
-This prevents the local server from consuming unlimited threads or database
-connections under load. The values are currently configured in
-`commerce_engine/settings.py`:
-
-```python
-MAX_CONCURRENT_REQUESTS = 20
-CAPACITY_WAIT_SECONDS = 2
+```text
+Client -> DRF checkout API -> transaction.atomic()
+       -> Product rows locked with select_for_update()
+       -> stock decremented and order saved
+       -> transaction commits
+       -> Celery tasks are queued in Redis
 ```
 
-These numbers can be changed during benchmarking.
+Redis has two jobs:
 
-## Requirement 3: Asynchronous Processing
+- Celery broker: stores queued background jobs.
+- Django cache: stores product API responses and supports throttling.
 
-Checkout should not wait for emails or invoices. Instead, it inserts rows into
-`BackgroundTask` during the transaction. A separate worker processes those rows:
+`django-celery-results` stores task status and results in the database so failed
+or completed tasks can be inspected later.
+
+## Database Schema
+
+Main tables:
+
+- `auth_user`: simple Django users for register/login.
+- `shop_product`: product catalog and `stock_quantity`.
+- `shop_order`: order header linked to a user.
+- `shop_orderitem`: purchased products and quantities.
+- `django_celery_results_taskresult`: Celery task status/result history.
+
+The sensitive shared resource is:
+
+```text
+shop_product.stock_quantity
+```
+
+Checkout protects this field with `transaction.atomic()` and
+`select_for_update()`.
+
+## Folder Structure
+
+```text
+New project/
+|-- manage.py
+|-- requirements.txt
+|-- README.md
+|-- PROJECT_DOCUMENTATION.md
+|-- commerce_engine/
+|   |-- __init__.py
+|   |-- celery.py
+|   |-- settings.py
+|   |-- urls.py
+|   |-- asgi.py
+|   `-- wsgi.py
+`-- shop/
+    |-- admin.py
+    |-- apps.py
+    |-- middleware.py
+    |-- models.py
+    |-- serializers.py
+    |-- services.py
+    |-- tasks.py
+    |-- tests.py
+    |-- urls.py
+    |-- views.py
+    |-- migrations/
+    `-- management/
+        `-- commands/
+            |-- seed_demo.py
+            `-- simulate_concurrent_checkout.py
+```
+
+## Implementation Roadmap
+
+1. Define products, orders, and order items.
+2. Add token-based register/login using Django users.
+3. Implement checkout in a service function, not inside the view.
+4. Protect stock updates using database transactions and row locks.
+5. Add DRF throttling and a small request-capacity middleware.
+6. Queue email, invoice, and analytics jobs using Celery + Redis.
+7. Store task results with `django-celery-results`.
+8. Add tests and a command that simulates concurrent buyers.
+9. Document Postman examples, stress testing, bottlenecks, and future work.
+
+## Setup
+
+Install dependencies:
 
 ```powershell
-python manage.py process_tasks
+python -m pip install -r requirements.txt
 ```
 
-For a one-time demo:
+Apply migrations:
 
 ```powershell
-python manage.py process_tasks --once
-```
-
-This is intentionally a simple database-backed queue for student clarity. Later,
-it can be replaced with Celery and Redis while keeping the same idea: the HTTP
-request creates work, and workers perform the slow work outside the request.
-
-## Run Locally
-
-```powershell
-python manage.py makemigrations
 python manage.py migrate
 python manage.py seed_demo
+```
+
+Run Redis before testing Celery and Redis caching. The default URL is:
+
+```text
+redis://127.0.0.1:6379/0
+```
+
+Start Django:
+
+```powershell
 python manage.py runserver
 ```
 
-Open:
+Start a Celery worker:
 
-- `GET /api/products/`
-- `POST /api/checkout/`
-- `GET /api/tasks/`
-
-Checkout example:
-
-```json
-{
-  "customer_email": "student@example.com",
-  "items": [
-    {"product_id": 1, "quantity": 2}
-  ]
-}
+```powershell
+celery -A commerce_engine worker -l info --pool=solo -Q emails,invoices,analytics
 ```
 
-## Future Expansion
+Optional Flower monitoring:
 
-The next requirements can be added without replacing the current design:
+```powershell
+celery -A commerce_engine flower
+```
 
-- Redis cache around product reads in `shop.views.product_list`.
-- Batch sales aggregation as another management command.
-- Load balancing by running multiple Django instances behind Nginx or a simple
-  round-robin reverse proxy.
-- Stress testing with Locust or JMeter.
-- AOP-style performance monitoring by adding middleware/decorators that measure
-  request and service execution time without mixing timing code into business
-  logic.
+## Demo Users
+
+Created by `python manage.py seed_demo`:
+
+```text
+student / student123
+admin / admin12345
+```
+
+## Main API Endpoints
+
+Base URL:
+
+```text
+http://127.0.0.1:8000/api/
+```
+
+Endpoints:
+
+- `GET /health/`
+- `POST /auth/register/`
+- `POST /auth/login/`
+- `GET /products/`
+- `GET /products/<id>/`
+- `PATCH /products/<id>/stock/` admin only
+- `POST /checkout/` authenticated
+- `GET /orders/` authenticated
+- `GET /tasks/results/` admin only
+
+## Concurrency Demo
+
+This command starts many threads that all try to buy the same product:
+
+```powershell
+python manage.py simulate_concurrent_checkout --buyers 20 --stock 5
+```
+
+Expected idea:
+
+```text
+Successful orders: 5
+Rejected orders: 15
+Final stock: 0
+```
+
+For the strongest locking demonstration, use PostgreSQL. SQLite is useful for
+local development, but PostgreSQL gives real row-level locking for
+`select_for_update()`.
+
+## Tests
+
+```powershell
+python manage.py check
+python manage.py test
+```
+
+The current tests cover:
+
+- Checkout decreases stock.
+- Checkout queues Celery tasks after commit.
+- Overselling is rejected.
+- Failed checkout does not create an order or queue tasks.
+
+## Production-Style Server Command
+
+For a simple production-like run:
+
+```powershell
+gunicorn commerce_engine.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 30
+```
+
+Gunicorn is included because the project discusses backend capacity, worker
+limits, and timeout behavior.

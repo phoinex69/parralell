@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 
 from shop.models import Product
@@ -25,4 +26,20 @@ class Command(BaseCommand):
                 },
             )
 
-        self.stdout.write(self.style.SUCCESS("Demo products are ready"))
+        student, created = User.objects.get_or_create(
+            username="student",
+            defaults={"email": "student@example.com"},
+        )
+        if created:
+            student.set_password("student123")
+            student.save(update_fields=["password"])
+
+        admin, created = User.objects.get_or_create(
+            username="admin",
+            defaults={"email": "admin@example.com", "is_staff": True, "is_superuser": True},
+        )
+        if created:
+            admin.set_password("admin12345")
+            admin.save(update_fields=["password"])
+
+        self.stdout.write(self.style.SUCCESS("Demo products and users are ready"))
