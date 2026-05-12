@@ -719,6 +719,36 @@ redis://127.0.0.1:6379/1
 If Redis is not running, basic API testing may still work, but Celery workers
 cannot process queued tasks properly.
 
+The easiest way to run Redis is Docker Compose:
+
+```powershell
+docker compose up --build
+```
+
+This starts Redis automatically in a container named:
+
+```text
+commerce_redis
+```
+
+Check Redis:
+
+```powershell
+docker compose exec redis redis-cli ping
+```
+
+Expected:
+
+```text
+PONG
+```
+
+For the full Docker setup, read:
+
+```text
+DOCKER_GUIDE.md
+```
+
 ## 20. How To Run Celery Worker
 
 Open a second PowerShell terminal.

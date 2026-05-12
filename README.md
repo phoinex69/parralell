@@ -122,6 +122,41 @@ Run Redis before testing Celery and Redis caching. The default URL is:
 redis://127.0.0.1:6379/0
 ```
 
+## Recommended Docker Setup
+
+If Redis is not working locally, use Docker Compose. It starts Django, Celery,
+Redis, PostgreSQL, and optional Flower with one setup.
+
+Start the main project:
+
+```powershell
+docker compose up --build
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000/api/health/
+```
+
+Check Redis:
+
+```powershell
+docker compose exec redis redis-cli ping
+```
+
+Run the concurrency demo inside Docker:
+
+```powershell
+docker compose exec web python manage.py simulate_concurrent_checkout --buyers 20 --stock 5
+```
+
+For the full Docker explanation, read:
+
+```text
+DOCKER_GUIDE.md
+```
+
 Start Django:
 
 ```powershell
