@@ -157,6 +157,9 @@ For the full Docker explanation, read:
 DOCKER_GUIDE.md
 ```
 
+This Docker setup was verified on this machine. Redis, PostgreSQL, Django,
+Celery, Flower, tests, checkout, and the concurrency demo all ran successfully.
+
 Start Django:
 
 ```powershell

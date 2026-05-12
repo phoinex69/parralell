@@ -5,6 +5,35 @@
 This guide explains how to run the project with Docker. This is the easiest way
 to make Redis work because Docker starts Redis in its own container.
 
+## Verified On This Machine
+
+I checked the Docker setup on this machine on May 12, 2026.
+
+Verified results:
+
+```text
+docker compose config        passed
+docker compose build         passed
+docker compose up -d         passed
+Redis ping                   PONG
+PostgreSQL health check      accepting connections
+Django health endpoint       {"status":"ok"}
+Django tests inside Docker   OK
+Checkout API                 created order successfully
+Celery worker                processed email/invoice/analytics tasks
+Task results API             returned SUCCESS task results
+Concurrency demo             5 success, 15 rejected, final stock 0
+Flower dashboard             HTTP 200 on port 5555
+```
+
+The first build had one network problem while downloading packages from PyPI:
+
+```text
+IncompleteRead during pip install
+```
+
+I fixed that by adding pip retries and longer timeouts in the `Dockerfile`.
+
 ## 1. Why Docker Is Useful Here
 
 The project needs several services:
@@ -108,6 +137,17 @@ gunicorn ...
 
 So the database tables and demo data are created automatically.
 
+The first build can take time because Docker downloads the Python base image and
+Python packages. If the internet connection cuts during package download, run
+the same command again. The Dockerfile uses pip retries and longer timeouts to
+make this more reliable.
+
+If you want to see detailed build progress:
+
+```powershell
+docker compose --progress=plain build
+```
+
 ## 4. Open The Backend
 
 When the containers are running, open:
@@ -144,6 +184,12 @@ PONG
 
 This proves Redis is running.
 
+The verified result on this machine was:
+
+```text
+PONG
+```
+
 ## 6. Check That PostgreSQL Is Working
 
 Run:
@@ -156,6 +202,12 @@ Expected:
 
 ```text
 commerce_engine: accepting connections
+```
+
+The verified result on this machine was:
+
+```text
+/var/run/postgresql:5432 - accepting connections
 ```
 
 ## 7. View Container Logs
@@ -260,6 +312,15 @@ Rejected orders: 15
 Final stock: 0
 ```
 
+The verified result on this machine was exactly:
+
+```text
+Starting concurrency demo: 20 buyers, stock=5
+Successful orders: 5
+Rejected orders: 15
+Final stock: 0
+```
+
 This is the best demonstration for the Parallel Programming course.
 
 ## 10. Run Tests In Docker
@@ -276,6 +337,13 @@ Run system check:
 docker compose exec web python manage.py check
 ```
 
+Verified result on this machine:
+
+```text
+Ran 3 tests
+OK
+```
+
 ## 11. Run Flower Monitoring
 
 Flower is optional. Start it with:
@@ -288,6 +356,12 @@ Open:
 
 ```text
 http://127.0.0.1:5555
+```
+
+Verified result on this machine:
+
+```text
+HTTP 200
 ```
 
 Flower shows:
@@ -383,6 +457,20 @@ Run:
 docker compose ps
 docker compose logs redis
 ```
+
+### First Docker build is very slow
+
+This can happen on a slow connection because Docker downloads the Python image
+and Python packages.
+
+Use:
+
+```powershell
+docker compose --progress=plain build
+```
+
+If you see a temporary download error such as `IncompleteRead`, run the build
+again. The Dockerfile now uses retries and longer timeouts.
 
 ### Database needs reset
 
