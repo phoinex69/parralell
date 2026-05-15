@@ -136,6 +136,33 @@ Flower is optional monitoring for Celery.
 It gives a browser dashboard to see workers, queues, tasks, retries, and
 failures.
 
+### Docker And Docker Compose
+
+Docker is used to run the project with all external services included.
+
+I added Docker because Redis and PostgreSQL are separate services. Without
+Docker, they must be installed and configured directly on the machine. On
+Windows, Redis especially can be difficult to run locally.
+
+Docker Compose starts everything together:
+
+```text
+web      Django + Gunicorn API server
+worker   Celery worker
+redis    Redis queue/cache server
+db       PostgreSQL database
+flower   optional Celery monitoring dashboard
+```
+
+This simplified the project because one command can run the full backend
+environment:
+
+```powershell
+docker compose up --build
+```
+
+In simple terms, Docker gives the project a ready backend lab environment.
+
 ## 3. Project Structure
 
 The project has one Django project and one Django app.
@@ -152,6 +179,9 @@ Important files:
 commerce_engine/settings.py
 commerce_engine/urls.py
 commerce_engine/celery.py
+Dockerfile
+docker-compose.yml
+DOCKER_GUIDE.md
 ```
 
 ```text
@@ -190,9 +220,10 @@ I built it in this order:
 11. Added Celery tasks for email, invoice, and analytics simulation.
 12. Added Redis caching for product reads.
 13. Added throttling and capacity middleware for overload protection.
-14. Added tests.
-15. Added a command to simulate many users buying the same product.
-16. Added documentation.
+14. Added Docker Compose so Redis, PostgreSQL, Django, Celery, and Flower run together.
+15. Added tests.
+16. Added a command to simulate many users buying the same product.
+17. Added documentation.
 
 I kept everything in one app because this is a university project. Splitting it
 into many services would make it harder to explain without improving the core
@@ -663,6 +694,180 @@ These prevent background workers from taking unlimited work or running forever.
 
 ## 18. How To Run The Project
 
+The recommended way is Docker because it runs Redis and PostgreSQL for you.
+
+### Recommended: Run With Docker
+
+Open PowerShell in:
+
+```text
+C:\Users\mhdta\Documents\New project
+```
+
+Run:
+
+```powershell
+docker compose up --build
+```
+
+This starts:
+
+```text
+commerce_web      Django API server
+commerce_worker   Celery background worker
+commerce_redis    Redis queue/cache
+commerce_db       PostgreSQL database
+```
+
+The web container automatically runs:
+
+```text
+python manage.py migrate
+python manage.py seed_demo
+gunicorn commerce_engine.wsgi:application --bind 0.0.0.0:8000
+```
+
+This means Docker prepares the database, creates demo products/users, and starts
+the backend API.
+
+Open:
+
+```text
+http://127.0.0.1:8000/api/health/
+```
+
+Expected:
+
+```json
+{"status":"ok"}
+```
+
+### Why Docker Uses Different Redis And Database URLs
+
+When running locally without Docker, Redis is usually:
+
+```text
+redis://127.0.0.1:6379/0
+```
+
+Inside Docker, `127.0.0.1` means the current container, not the Redis container.
+So the Django container must connect to Redis using the Compose service name:
+
+```text
+redis://redis:6379/0
+```
+
+The same idea applies to PostgreSQL:
+
+```text
+POSTGRES_HOST=db
+```
+
+In `docker-compose.yml`, the service names are:
+
+```text
+redis
+db
+web
+worker
+flower
+```
+
+Docker Compose creates a private network, and containers find each other by
+these names.
+
+### Check Docker Services
+
+See running containers:
+
+```powershell
+docker compose ps
+```
+
+Check Redis:
+
+```powershell
+docker compose exec redis redis-cli ping
+```
+
+Expected:
+
+```text
+PONG
+```
+
+Check PostgreSQL:
+
+```powershell
+docker compose exec db pg_isready -U commerce_user -d commerce_engine
+```
+
+Expected:
+
+```text
+accepting connections
+```
+
+Check Django:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/health/ |
+  Select-Object -ExpandProperty Content
+```
+
+Expected:
+
+```json
+{"status":"ok"}
+```
+
+### View Docker Logs
+
+All logs:
+
+```powershell
+docker compose logs
+```
+
+Django only:
+
+```powershell
+docker compose logs web
+```
+
+Celery worker only:
+
+```powershell
+docker compose logs worker
+```
+
+Redis only:
+
+```powershell
+docker compose logs redis
+```
+
+### Stop Docker
+
+Stop containers:
+
+```powershell
+docker compose down
+```
+
+Stop containers and delete PostgreSQL/Redis stored data:
+
+```powershell
+docker compose down -v
+```
+
+Use `-v` only when you want a fresh database.
+
+### Manual Local Run
+
+This is useful only if Python dependencies, Redis, and a database are already
+available on your machine.
+
 Open PowerShell in:
 
 ```text
@@ -719,7 +924,8 @@ redis://127.0.0.1:6379/1
 If Redis is not running, basic API testing may still work, but Celery workers
 cannot process queued tasks properly.
 
-The easiest way to run Redis is Docker Compose:
+The easiest way to run Redis is Docker Compose because it starts Redis in a
+container:
 
 ```powershell
 docker compose up --build
@@ -749,11 +955,38 @@ For the full Docker setup, read:
 DOCKER_GUIDE.md
 ```
 
+In Docker, the Django settings use:
+
+```text
+REDIS_URL=redis://redis:6379/0
+CACHE_REDIS_URL=redis://redis:6379/1
+```
+
+Database `0` is used for Celery queue messages.
+
+Database `1` is used for Django cache data.
+
 ## 20. How To Run Celery Worker
 
-Open a second PowerShell terminal.
+If you are using Docker, the worker starts automatically.
 
-Run:
+View the worker logs:
+
+```powershell
+docker compose logs worker
+```
+
+When checkout happens, the worker logs should show tasks such as:
+
+```text
+send_order_confirmation
+generate_invoice
+log_order_analytics
+```
+
+If you are running locally without Docker, open a second PowerShell terminal and
+run:
+
 
 ```powershell
 celery -A commerce_engine worker -l info --pool=solo -Q emails,invoices,analytics
@@ -766,7 +999,19 @@ When checkout happens, you should see task logs in this terminal.
 
 ## 21. Optional Flower Monitoring
 
-Open another terminal:
+With Docker:
+
+```powershell
+docker compose --profile monitoring up -d flower
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5555
+```
+
+Without Docker, open another terminal:
 
 ```powershell
 celery -A commerce_engine flower
@@ -785,6 +1030,9 @@ Flower lets you see:
 - completed tasks
 - failed tasks
 - retries
+
+In the verified Docker setup on this machine, Flower returned HTTP 200 on port
+5555.
 
 ## 22. Demo Users
 
@@ -1024,7 +1272,13 @@ Invoke-RestMethod `
 
 ## 25. How To Test Race Condition Prevention
 
-Run:
+Recommended Docker command:
+
+```powershell
+docker compose exec web python manage.py simulate_concurrent_checkout --buyers 20 --stock 5
+```
+
+Manual local command:
 
 ```powershell
 python manage.py simulate_concurrent_checkout --buyers 20 --stock 5
@@ -1044,6 +1298,8 @@ Successful orders: 5
 Rejected orders: 15
 Final stock: 0
 ```
+
+This exact Docker result was verified on this machine.
 
 This proves that even when 20 buyers try at the same time, only 5 can buy
 because only 5 items exist.
@@ -1081,6 +1337,12 @@ This shows created orders.
 ### Celery worker terminal
 
 When tasks run, the Celery terminal shows logs.
+
+With Docker:
+
+```powershell
+docker compose logs worker
+```
 
 ### Task results API
 
@@ -1126,6 +1388,15 @@ A good explanation:
 > capacity middleware, worker limits, retries, and timeouts to show resource
 > management.
 
+Docker explanation:
+
+> I dockerized the project because Redis and PostgreSQL are external services.
+> Docker Compose starts Django, Celery, Redis, PostgreSQL, and Flower together.
+> Inside Docker, Django connects to Redis using `redis:6379` and to PostgreSQL
+> using `db:5432`, because those are the Compose service names. This makes the
+> project easier to run and gives a realistic environment for testing queues,
+> caching, and row-level database locks.
+
 ## 28. What Happens If Redis Is Down
 
 If Redis is down:
@@ -1168,6 +1439,56 @@ So you can say:
 > database because it supports row-level locks.
 
 ## 31. Important Commands Summary
+
+Recommended Docker run:
+
+```powershell
+docker compose up --build
+```
+
+Docker service status:
+
+```powershell
+docker compose ps
+```
+
+Docker Redis check:
+
+```powershell
+docker compose exec redis redis-cli ping
+```
+
+Docker tests:
+
+```powershell
+docker compose exec web python manage.py test
+```
+
+Docker concurrency demo:
+
+```powershell
+docker compose exec web python manage.py simulate_concurrent_checkout --buyers 20 --stock 5
+```
+
+Docker worker logs:
+
+```powershell
+docker compose logs worker
+```
+
+Docker Flower:
+
+```powershell
+docker compose --profile monitoring up -d flower
+```
+
+Docker stop:
+
+```powershell
+docker compose down
+```
+
+Manual local commands:
 
 Install:
 

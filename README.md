@@ -62,8 +62,13 @@ Checkout protects this field with `transaction.atomic()` and
 New project/
 |-- manage.py
 |-- requirements.txt
+|-- Dockerfile
+|-- docker-compose.yml
+|-- .dockerignore
 |-- README.md
 |-- PROJECT_DOCUMENTATION.md
+|-- STUDENT_EXPLANATION_GUIDE.md
+|-- DOCKER_GUIDE.md
 |-- commerce_engine/
 |   |-- __init__.py
 |   |-- celery.py
@@ -101,48 +106,68 @@ New project/
 8. Add tests and a command that simulates concurrent buyers.
 9. Document Postman examples, stress testing, bottlenecks, and future work.
 
-## Setup
+## Setup Options
 
-Install dependencies:
+There are two ways to run the project:
 
-```powershell
-python -m pip install -r requirements.txt
-```
-
-Apply migrations:
-
-```powershell
-python manage.py migrate
-python manage.py seed_demo
-```
-
-Run Redis before testing Celery and Redis caching. The default URL is:
-
-```text
-redis://127.0.0.1:6379/0
-```
+- **Recommended:** Docker Compose, because it starts Redis and PostgreSQL for you.
+- **Local manual:** Python directly on your machine, useful only if Redis and database services are already installed.
 
 ## Recommended Docker Setup
 
-If Redis is not working locally, use Docker Compose. It starts Django, Celery,
-Redis, PostgreSQL, and optional Flower with one setup.
+Docker is the easiest way to run the full project correctly. It starts all
+services needed by the backend:
 
-Start the main project:
+```text
+web      Django + Gunicorn API server
+worker   Celery worker for background jobs
+redis    Redis queue/cache service
+db       PostgreSQL database
+flower   optional Celery monitoring dashboard
+```
+
+Build and start the main services:
 
 ```powershell
 docker compose up --build
 ```
 
-Open:
+The `web` container automatically runs:
+
+```text
+python manage.py migrate
+python manage.py seed_demo
+gunicorn commerce_engine.wsgi:application --bind 0.0.0.0:8000
+```
+
+Open the API health check:
 
 ```text
 http://127.0.0.1:8000/api/health/
+```
+
+Expected:
+
+```json
+{"status":"ok"}
 ```
 
 Check Redis:
 
 ```powershell
 docker compose exec redis redis-cli ping
+```
+
+Expected:
+
+```text
+PONG
+```
+
+Check PostgreSQL:
+
+```powershell
+docker compose exec db pg_isready -U commerce_user -d commerce_engine
 ```
 
 Run the concurrency demo inside Docker:
@@ -159,6 +184,43 @@ DOCKER_GUIDE.md
 
 This Docker setup was verified on this machine. Redis, PostgreSQL, Django,
 Celery, Flower, tests, checkout, and the concurrency demo all ran successfully.
+
+Docker service names matter. Inside containers, Django connects to Redis with
+`redis://redis:6379/0` and PostgreSQL with `POSTGRES_HOST=db`. That is why Redis
+works without being installed directly on Windows.
+
+Stop the containers:
+
+```powershell
+docker compose down
+```
+
+Reset Docker database/cache data:
+
+```powershell
+docker compose down -v
+```
+
+## Local Manual Setup
+
+Install dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Apply migrations:
+
+```powershell
+python manage.py migrate
+python manage.py seed_demo
+```
+
+Run Redis before testing Celery and Redis caching. The default local URL is:
+
+```text
+redis://127.0.0.1:6379/0
+```
 
 Start Django:
 
